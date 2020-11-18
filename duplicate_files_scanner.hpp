@@ -170,93 +170,38 @@ namespace oasis::filesystem
         template<typename DirIterT> //requires std::is_same<std::filesystem::directory_iterator, DirIterT>
         void _build_list(const DirIterT& iter, const std::filesystem::path& search_dir)
         {
-            std::for_each(std::execution::par, std::filesystem::begin(iter), std::filesystem::end(iter), [&](const std::filesystem::directory_entry& dirent)
+            //std::for_each(std::execution::par, std::filesystem::begin(iter), std::filesystem::end(iter), [&](const std::filesystem::directory_entry& dirent)
+            //{
+            for (const auto& dirent : iter)
             {
-                /*std::error_code ec;
-                std::filesystem::path p;
-                if (dirent.is_symlink(ec))
-                {
-                    if (ec)
-                    {
-                        if (_scan_error_callback) _scan_error_callback(search_dir, dirent.path(), ec.default_error_condition());
-                        return;
-                    }
-                    if (!_follow_links) return;
-                    p = std::filesystem::read_symlink(dirent.path(), ec);
-                    if (ec)
-                    {
-                        if (_scan_error_callback) _scan_error_callback(search_dir, dirent.path(), ec.default_error_condition());
-                        return;
-                    }
-                }
-                else
-                {
-                    p = dirent.path();
-                }
-                if (!std::filesystem::exists(p, ec) && !ec) return;
-                if (ec)
-                {
-                    if (_scan_error_callback) _scan_error_callback(search_dir, dirent.path(), ec.default_error_condition());
-                    return;
-                }
-                if (!std::filesystem::is_regular_file(p, ec)) return;
-                if (ec)
-                {
-                    if (_scan_error_callback) _scan_error_callback(search_dir, dirent.path(), ec.default_error_condition());
-                    return;
-                }
-                if (!_extensions.empty())
-                {
-                    auto e = p.extension().string();
-                    if (!_extensions.contains(e)) return;
-                }
-                std::tuple<uintmax_t, std::string> h;
-                if (!_get_hash_of_file(p, h, ec))
-                {
-                    if (ec && _scan_error_callback) _scan_error_callback(search_dir, dirent.path(), ec.default_error_condition());
-                    return;
-                }
-
-                _list_lock.lock();
-                _files_examined++;
-                if (_sets.contains(h))
-                {
-                    _sets.at(h).insert(p);
-                    // Raise the callback.
-                    if (_sets.at(h).size() == 2)
-                    {
-                        _sets_found++;
-                        if (_scan_progress_callback) _scan_progress_callback(search_dir, _files_examined, _sets_found);
-                    }
-                }
-                else
-                {
-                    auto result = _sets.emplace(std::make_pair(h, std::set<std::filesystem::path, filename_sort>()));
-                    if (result.second) result.first->second.insert(p);
-                }
-                _list_lock.unlock(); */ _add_file(dirent.path(), search_dir);
-            });
+                _add_file(dirent.path(), search_dir);
+            }
+            //});
         }
 
     public:
-        //using size_type = typename std::map<std::tuple<uintmax_t, StringT>, std::set<std::filesystem::path, sorter>>::size_type;
-        using value_type = std::set<std::filesystem::path, filename_sort>;
-        //using reference =  value_type&;
-        using const_reference = const value_type&;
-        //using difference_type = std::map<std::tuple<uintmax_t, StringT>, std::set<std::filesystem::path, sorter>>::difference_type;
-        using pointer = value_type *; // typename std::add_pointer<std::set<std::filesystem::path, sorter>>::type;
-        using const_pointer = const pointer;
+        typedef std::map<std::tuple<uintmax_t, std::string>, std::set<std::filesystem::path, filename_sort>>::size_type size_type;
+        typedef std::set<std::filesystem::path, filename_sort> value_type;
+        typedef value_type& reference;
+        typedef const value_type& const_reference;
+        typedef std::map<std::tuple<uintmax_t, std::string>, std::set<std::filesystem::path, filename_sort>>::difference_type difference_type;
+        typedef value_type * pointer;
+        typedef const pointer const_pointer;
 
         using map_t = std::map<std::tuple<uintmax_t, std::string>, std::set<std::filesystem::path, filename_sort>>;
 
-        class iterator : public std::iterator<std::bidirectional_iterator_tag, value_type>
+        class iterator
         {
         private:
             using realiterator_t = typename map_t::iterator;
             using value_t = typename map_t::mapped_type;
             realiterator_t under;
         public:
-            using iterator_category = std::bidirectional_iterator_tag;
+            typedef std::bidirectional_iterator_tag iterator_category;
+            typedef std::set<std::filesystem::path, filename_sort> value_type;
+            typedef std::map<std::tuple<uintmax_t, std::string>, std::set<std::filesystem::path, filename_sort>>::difference_type difference_type;
+            typedef value_type& reference;
+            typedef value_type * pointer;
 
             explicit iterator(realiterator_t x)
             {
@@ -312,14 +257,18 @@ namespace oasis::filesystem
             //difference_type operator-(iterator) const; //optional
         };
 
-        class const_iterator : public std::iterator<std::bidirectional_iterator_tag, value_type>
+        class const_iterator
         {
         private:
             using realconst_iterator_t = typename map_t::const_iterator;
             using value_t = typename std::add_const<typename map_t::mapped_type>::type;
             realconst_iterator_t under;
         public:
-            using iterator_category = std::bidirectional_iterator_tag;
+            typedef std::bidirectional_iterator_tag iterator_category;
+            typedef std::set<std::filesystem::path, filename_sort> value_type;
+            typedef std::map<std::tuple<uintmax_t, std::string>, std::set<std::filesystem::path, filename_sort>>::difference_type difference_type;
+            typedef value_type& reference;
+            typedef value_type* pointer;
 
             explicit const_iterator(realconst_iterator_t x)
             {
@@ -375,9 +324,6 @@ namespace oasis::filesystem
             //difference_type operator-(const_iterator) const; //optional
         };
 
-        using reverse_iterator = std::reverse_iterator<iterator>;
-        using const_reverse_iterator = std::reverse_iterator<const_iterator>;
-
         iterator begin() noexcept
         {
             return iterator(_sets.begin());
@@ -408,7 +354,7 @@ namespace oasis::filesystem
             return const_iterator(_sets.cend());
         }
 
-        reverse_iterator rbegin() noexcept
+        /*reverse_iterator rbegin() noexcept
         {
             return reverse_iterator(_sets.rbegin());
         }
@@ -436,7 +382,7 @@ namespace oasis::filesystem
         const_reverse_iterator crend() const noexcept
         {
             return const_reverse_iterator(_sets.crend());
-        }
+        } */
 
         [[nodiscard]] bool empty() const noexcept override
         {
