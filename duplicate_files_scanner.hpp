@@ -2,6 +2,7 @@
 #include <fstream>
 #include <filesystem>
 #include <map>
+#include <forward_list>
 #include <tuple>
 #include <execution>
 #include <memory>
@@ -9,7 +10,7 @@
 #include <thread>
 #include <mutex>
 #include <iterator>
-#include <execution>
+//#include <execution>
 #include <botan/skein_512.h>
 #include <boost/algorithm/string.hpp>
 #include <boost/regex.hpp>
@@ -24,11 +25,10 @@ namespace oasis::filesystem
     {
     private:
         bool _remove_single;
-        static constexpr size_t buffer_size = 10485760;
         std::map<std::tuple<uintmax_t, std::string>, std::set<std::filesystem::path, filename_sort>> _sets;
         std::mutex _list_lock;
-        std::unique_ptr<uint8_t> _buffer;
         uintmax_t _sets_found;
+        std::forward_list<std::thread> _threads;
         std::function<void(const std::filesystem::path&)> _scan_started_callback;
         std::function<void(const std::filesystem::path&, uintmax_t, uintmax_t)> _scan_progress_callback;
         std::function<void(const std::filesystem::path&, uintmax_t, uintmax_t)> _scan_completed_callback;
@@ -39,9 +39,13 @@ namespace oasis::filesystem
         bool _get_hash_of_file(const std::filesystem::path& p, std::tuple<std::uintmax_t, std::string>& out, std::error_code& ec)
         {
             ec.clear();
+            std::unique_ptr<uint8_t> _buffer;
             auto s = std::filesystem::file_size(p, ec);
             if (ec) return false;
             if ((s < _min_size) || (s > _max_size)) return false;
+
+            size_t buffer_size = (s < 10485760) ? s : 10485760;
+            _buffer = std::unique_ptr<uint8_t>(new uint8_t[buffer_size]);
 
             static constexpr char hex[] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'};
             Botan::Skein_512 hasher;
@@ -89,7 +93,7 @@ namespace oasis::filesystem
             return true;
         }
 
-        void _add_file(const std::filesystem::path& dirent, const std::filesystem::path& search_dir)
+        void _add_file(const std::filesystem::path dirent, const std::filesystem::path search_dir)
         {
             std::error_code ec;
             std::filesystem::path p;
@@ -145,13 +149,13 @@ namespace oasis::filesystem
                 return;
             }
 
-            std::cout << "Hash key of " << p << " " << std::get<0>(h) << " " << std::get<1>(h) << std::endl;
+            //std::cout << "Hash key of " << p << " " << std::get<0>(h) << " " << std::get<1>(h) << std::endl;
 
             _list_lock.lock();
             _files_examined++;
             if (_sets.contains(h))
             {
-                _sets.at(h).insert(p);
+                _sets.at(h).emplace(p);// .insert(p);
                 // Raise the callback.
                 if (_sets.at(h).size() == 2)
                 {
@@ -162,7 +166,7 @@ namespace oasis::filesystem
             else
             {
                 auto result = _sets.emplace(std::make_pair(h, std::set<std::filesystem::path, filename_sort>()));
-                if (result.second) result.first->second.insert(p);
+                if (result.second) result.first->second.emplace(p);
             }
             _list_lock.unlock();
         }
@@ -170,13 +174,11 @@ namespace oasis::filesystem
         template<typename DirIterT> //requires std::is_same<std::filesystem::directory_iterator, DirIterT>
         void _build_list(const DirIterT& iter, const std::filesystem::path& search_dir)
         {
-            //std::for_each(std::execution::par, std::filesystem::begin(iter), std::filesystem::end(iter), [&](const std::filesystem::directory_entry& dirent)
-            //{
             for (const auto& dirent : iter)
             {
-                _add_file(dirent.path(), search_dir);
+                std::thread t([dirent, search_dir, this] { _add_file(dirent.path(), search_dir); });
+                _threads.push_front(std::move(t));
             }
-            //});
         }
 
     public:
@@ -190,12 +192,12 @@ namespace oasis::filesystem
 
         using map_t = std::map<std::tuple<uintmax_t, std::string>, std::set<std::filesystem::path, filename_sort>>;
 
-        class iterator
+        template<typename IterT>
+        class basic_iterator
         {
         private:
-            using realiterator_t = typename map_t::iterator;
             using value_t = typename map_t::mapped_type;
-            realiterator_t under;
+            IterT under;
         public:
             typedef std::bidirectional_iterator_tag iterator_category;
             typedef std::set<std::filesystem::path, filename_sort> value_type;
@@ -203,7 +205,7 @@ namespace oasis::filesystem
             typedef value_type& reference;
             typedef value_type * pointer;
 
-            explicit iterator(realiterator_t x)
+            explicit basic_iterator(IterT x)
             {
                 under = x;
             }
@@ -218,111 +220,42 @@ namespace oasis::filesystem
                 return &under->second;
             }
 
-            bool operator!=(const iterator& o) const
+            bool operator!=(const basic_iterator& o) const
             {
                 return under != o.under;
             }
 
-            iterator& operator++()
+            basic_iterator& operator++()
             {
                 ++under;
                 return *this;
             }
 
-            iterator operator++(int)
+            basic_iterator operator++(int)
             {
-                iterator x(*this);
+                basic_iterator x(*this);
                 ++under;
                 return x;
             }
 
-            iterator& operator--()
+            basic_iterator& operator--()
             {
                 --under;
                 return *this;
             }
 
-            iterator operator--(int)
+            basic_iterator operator--(int)
             {
-                iterator x(*this);
+                basic_iterator x(*this);
                 --under;
                 return x;
             }
-
-            //iterator& operator+=(size_type); //optional
-            //iterator operator+(size_type) const; //optional
-            //friend iterator operator+(size_type, const iterator&); //optional
-            //iterator& operator-=(size_type); //optional
-            //iterator operator-(size_type) const; //optional
-            //difference_type operator-(iterator) const; //optional
         };
 
-        class const_iterator
-        {
-        private:
-            using realconst_iterator_t = typename map_t::const_iterator;
-            using value_t = typename std::add_const<typename map_t::mapped_type>::type;
-            realconst_iterator_t under;
-        public:
-            typedef std::bidirectional_iterator_tag iterator_category;
-            typedef std::set<std::filesystem::path, filename_sort> value_type;
-            typedef std::map<std::tuple<uintmax_t, std::string>, std::set<std::filesystem::path, filename_sort>>::difference_type difference_type;
-            typedef value_type& reference;
-            typedef value_type* pointer;
-
-            explicit const_iterator(realconst_iterator_t x)
-            {
-                under = x;
-            }
-
-            const_reference operator*() const
-            {
-                return under->second;
-            }
-
-            const_pointer operator->() const
-            {
-                return const_cast<const_pointer>(&under->second);
-            }
-
-            bool operator!=(const const_iterator& o) const
-            {
-                return under != o.under;
-            }
-
-            const_iterator& operator++()
-            {
-                ++under;
-                return *this;
-            }
-
-            const_iterator operator++(int)
-            {
-                const_iterator x(*this);
-                ++under;
-                return x;
-            }
-
-            const_iterator& operator--()
-            {
-                --under;
-                return *this;
-            }
-
-            const_iterator operator--(int)
-            {
-                const_iterator x(*this);
-                --under;
-                return x;
-            }
-
-            //const_iterator& operator+=(size_type); //optional
-            //const_iterator operator+(size_type) const; //optional
-            //friend const_iterator operator+(size_type, const const_iterator&); //optional
-            //const_iterator& operator-=(size_type); //optional
-            //const_iterator operator-(size_type) const; //optional
-            //difference_type operator-(const_iterator) const; //optional
-        };
+        typedef basic_iterator<map_t::iterator> iterator;
+        typedef basic_iterator<map_t::const_iterator> const_iterator;
+        typedef basic_iterator<map_t::reverse_iterator> reverse_iterator;
+        typedef basic_iterator<map_t::const_reverse_iterator> const_reverse_iterator;
 
         iterator begin() noexcept
         {
@@ -354,17 +287,17 @@ namespace oasis::filesystem
             return const_iterator(_sets.cend());
         }
 
-        /*reverse_iterator rbegin() noexcept
+        reverse_iterator rbegin() noexcept
         {
             return reverse_iterator(_sets.rbegin());
         }
 
-        const_reverse_iterator rbegin() const noexcept
+        [[nodiscard]] const_reverse_iterator rbegin() const noexcept
         {
             return const_reverse_iterator(_sets.rbegin());
         }
 
-        const_reverse_iterator crbegin() const noexcept
+        [[nodiscard]] const_reverse_iterator crbegin() const noexcept
         {
             return const_reverse_iterator(_sets.crbegin());
         }
@@ -374,15 +307,15 @@ namespace oasis::filesystem
             return reverse_iterator(_sets.rend());
         }
 
-        const_reverse_iterator rend() const noexcept
+        [[nodiscard]] const_reverse_iterator rend() const noexcept
         {
             return const_reverse_iterator(_sets.rend());
         }
 
-        const_reverse_iterator crend() const noexcept
+        [[nodiscard]] const_reverse_iterator crend() const noexcept
         {
             return const_reverse_iterator(_sets.crend());
-        } */
+        }
 
         [[nodiscard]] bool empty() const noexcept override
         {
@@ -399,14 +332,14 @@ namespace oasis::filesystem
             _sets.clear();
         }
 
-        void set_scan_progress_callback(const std::function<void(const std::filesystem::path&, uintmax_t, uintmax_t)>& callback)
-        {
-            _scan_progress_callback = callback;
-        }
-
         void set_scan_started_callback(const std::function<void(const std::filesystem::path&)>& callback)
         {
             _scan_started_callback = callback;
+        }
+
+        void set_scan_progress_callback(const std::function<void(const std::filesystem::path&, uintmax_t, uintmax_t)>& callback)
+        {
+            _scan_progress_callback = callback;
         }
 
         void set_scan_completed_callback(const std::function<void(const std::filesystem::path&, uintmax_t, uintmax_t)>& callback)
@@ -427,7 +360,6 @@ namespace oasis::filesystem
         duplicate_files_scanner& operator=(duplicate_files_scanner&& other) noexcept
         {
             _sets = std::move(other._sets);
-            _buffer = std::move(other._buffer);
             _follow_links = other._follow_links;
             _remove_single = other._remove_single;
             _files_examined = other._files_examined;
@@ -441,7 +373,6 @@ namespace oasis::filesystem
 
         duplicate_files_scanner() : directory_scanner()
         {
-            _buffer = std::unique_ptr<uint8_t>(new uint8_t[buffer_size]);
             _remove_single = true;
             _sets_found = 0;
         }
@@ -451,7 +382,6 @@ namespace oasis::filesystem
         duplicate_files_scanner(duplicate_files_scanner&& other) noexcept
         {
             _sets = std::move(other._sets);
-            _buffer = std::move(other._buffer);
             _follow_links = other._follow_links;
             _remove_single = other._remove_single;
             _files_examined = other._files_examined;
@@ -469,7 +399,7 @@ namespace oasis::filesystem
             std::filesystem::directory_options opts = std::filesystem::directory_options::skip_permission_denied;
             if (_follow_links) opts |= std::filesystem::directory_options::follow_directory_symlink;
 
-            if (_scan_progress_callback) _scan_progress_callback(abs_search_dir, _files_examined, _sets_found);
+            if (_scan_started_callback) _scan_started_callback(abs_search_dir);
 
             if (recursive)
             {
@@ -480,6 +410,11 @@ namespace oasis::filesystem
             {
                 std::filesystem::directory_iterator iter(abs_search_dir, opts);
                 _build_list(iter, abs_search_dir);
+            }
+
+            for (std::thread& t : _threads)
+            {
+                if (t.joinable()) t.join();
             }
 
             if (_remove_single)
@@ -495,7 +430,7 @@ namespace oasis::filesystem
                 }
             }
 
-            if (_scan_progress_callback) _scan_progress_callback(abs_search_dir, _files_examined, _sets_found);
+            if (_scan_completed_callback) _scan_completed_callback(abs_search_dir, _files_examined, _sets_found);
         }
     };
 }
