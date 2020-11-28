@@ -1,207 +1,128 @@
 #include <iostream>
 #include <fstream>
-#include <filesystem>
+#include <boost/filesystem.hpp>
 #include <map>
 #include <forward_list>
 #include <tuple>
 #include <execution>
 #include <memory>
 #include <set>
-#include <thread>
+#include <boost/thread.hpp>
 #include <mutex>
 #include <iterator>
-//#include <execution>
 #include <botan/skein_512.h>
 #include <boost/algorithm/string.hpp>
 #include <boost/regex.hpp>
 #include "base.hpp"
+#include "directory_enumerator.hpp"
 
 #ifndef _DUPLICATE_SCANNER_LIST_HPP_
 #define _DUPLICATE_SCANNER_LIST_HPP_
 
 namespace oasis::filesystem
 {
+    template<typename SorterT = sort_by_filename>
     class duplicate_files_scanner : public directory_scanner
     {
     private:
         bool _remove_single;
-        std::map<std::tuple<uintmax_t, std::string>, std::set<std::filesystem::path, filename_sort>> _sets;
         std::mutex _list_lock;
+        uintmax_t _file_count;
+        uintmax_t _space_occupied;
         uintmax_t _sets_found;
-        std::forward_list<std::thread> _threads;
-        std::function<void(const std::filesystem::path&)> _scan_started_callback;
-        std::function<void(const std::filesystem::path&, uintmax_t, uintmax_t)> _scan_progress_callback;
-        std::function<void(const std::filesystem::path&, uintmax_t, uintmax_t)> _scan_completed_callback;
-        std::function<void(const std::filesystem::path&, const std::filesystem::path&, const std::error_condition&)> _scan_error_callback;
+        boost::thread_group _threads;
+        std::function<void(const boost::filesystem::path&)> _scan_started_callback;
+        std::function<void(const boost::filesystem::path&, uintmax_t, uintmax_t)> _scan_progress_callback;
+        std::function<void(const boost::filesystem::path&, uintmax_t, uintmax_t, uintmax_t, uintmax_t)> _scan_completed_callback;
+        std::function<void(const boost::filesystem::path&, const boost::filesystem::path&, const std::error_condition&)> _scan_error_callback;
+        using set_t = std::set<boost::filesystem::path, SorterT>;
+        using map_t = std::map<std::tuple<uintmax_t, std::string>, set_t>;
+        map_t _sets;
 
         friend class unique_files_scanner;
 
-        bool _get_hash_of_file(const std::filesystem::path& p, std::tuple<std::uintmax_t, std::string>& out, std::error_code& ec)
+        bool _get_hash_of_file(const boost::filesystem::path& p, std::tuple<std::uintmax_t, std::string>& out, boost::system::error_code& ec);
+        void _process_file(const boost::filesystem::path& dirent, bool recurse);
+
+
+        /*void _search_directory(const boost::filesystem::path& dir, bool recursive)
         {
-            ec.clear();
-            std::unique_ptr<uint8_t> _buffer;
-            auto s = std::filesystem::file_size(p, ec);
-            if (ec) return false;
-            if ((s < _min_size) || (s > _max_size)) return false;
-
-            size_t buffer_size = (s < 10485760) ? s : 10485760;
-            _buffer = std::unique_ptr<uint8_t>(new uint8_t[buffer_size]);
-
-            static constexpr char hex[] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'};
-            Botan::Skein_512 hasher;
-            auto digest_length = hasher.output_length();
-            std::ifstream file(p, std::ios::binary);
-            if (!file) return false;
-
-            std::string result;
-            result.reserve(digest_length * 2);   // Two digits per character
-            // If the contents of the file will fit inside the hash string then we can save a pointless hashing operation.
-            if (s <= digest_length)
+            boost::system::error_code ec;
+            if (dir.empty()) return;
+            bool exists = boost::filesystem::exists(dir, ec);
+            if (ec)
             {
-                result.insert(0, (digest_length * 2), '0');
-                file.read(reinterpret_cast<char *>(_buffer.get()), buffer_size);
-                auto temp = _buffer.get();
-                auto it = result.begin();
-                for (size_t i = 0; i < s; i++)
-                {
-                    auto c = temp[i];
-                    *it = hex[c / 16];
-                    it++;
-                    *it = hex[c % 16];
-                }
-            }
-            else
-            {
-                while (!file.eof())
-                {
-                    file.read(reinterpret_cast<char *>(_buffer.get()), buffer_size);
-                    //if (file.fail()) return false;
-                    auto bytes_read = file.gcount();
-                    if (bytes_read == 0) return false;
-                    hasher.update(_buffer.get(), bytes_read);
-                }
-                auto digest = hasher.final_stdvec();
-
-                for (uint8_t c : digest)
-                {
-                    result.push_back(hex[c / 16]);
-                    result.push_back(hex[c % 16]);
-                }
-            }
-
-            out = std::make_tuple(s, result);
-            return true;
-        }
-
-        void _add_file(const std::filesystem::path dirent, const std::filesystem::path search_dir)
-        {
-            std::error_code ec;
-            std::filesystem::path p;
-
-            if (_skip_hidden && is_hidden(dirent, ec))
-            {
-                if (ec && _scan_error_callback) _scan_error_callback(search_dir, dirent, ec.default_error_condition());
+                if (_scan_error_callback) _scan_error_callback(dir, boost::filesystem::path(), ec.default_error_condition());
                 return;
             }
-
-            if (std::filesystem::is_symlink(dirent, ec))
+            bool is_dir = boost::filesystem::is_directory(dir, ec);
+            if (ec)
             {
-                if (_follow_links)
+                if (_scan_error_callback) _scan_error_callback(dir, boost::filesystem::path(), ec.default_error_condition());
+                return;
+            }
+            bool hidden = is_hidden(dir, ec);
+            if (ec)
+            {
+                if (_scan_error_callback) _scan_error_callback(dir, boost::filesystem::path(), ec.default_error_condition());
+                return;
+            }
+            if (_skip_hidden && hidden) return;
+            if (!exists) return;
+            if (!is_dir) return;
+
+            boost::filesystem::directory_options opts = boost::filesystem::directory_options::skip_permission_denied | boost::filesystem::directory_options::skip_dangling_symlinks;
+            if (_follow_links) opts |= boost::filesystem::directory_options::follow_directory_symlink;
+            boost::filesystem::directory_iterator iter(dir, opts);
+            std::forward_list<boost::filesystem::path> files;
+
+            if (_scan_progress_callback) _scan_progress_callback(dir, _files_examined, _sets_found);
+
+            for (const auto& dirent : iter)
+            {
+                const auto& p = dirent.path();
+                is_dir = boost::filesystem::is_directory(p, ec);
+                if (ec)
                 {
-                    p = std::filesystem::canonical(dirent, ec);
-                    if (ec)
-                    {
-                        if (_scan_error_callback) _scan_error_callback(search_dir, dirent, ec.default_error_condition());
-                        return;
-                    }
+                    if (_scan_error_callback) _scan_error_callback(dir, boost::filesystem::path(), ec.default_error_condition());
+                    return;
+                }
+
+                if (is_dir && recursive)
+                {
+                    // _threads.create_thread([p, recursive, this] { _search_directory(p, recursive); });
+                    _search_directory(p, recursive);
                 }
                 else
                 {
-                    p = (dirent.is_absolute()) ? dirent : std::filesystem::absolute(dirent, ec);
+                    files.push_front(p);
                 }
             }
-            else
-            {
-                p = std::filesystem::canonical(dirent);
-            }
 
-            if (!std::filesystem::exists(p, ec) && !ec) return;
-            if (ec)
+            for (const auto& f : files)
             {
-                if (_scan_error_callback) _scan_error_callback(search_dir, dirent, ec.default_error_condition());
-                return;
+                _add_file(f, dir);
             }
-            if (!std::filesystem::is_regular_file(p, ec)) return;
-            if (ec)
-            {
-                if (_scan_error_callback) _scan_error_callback(search_dir, dirent, ec.default_error_condition());
-                return;
-            }
-            if (!_extensions.empty())
-            {
-                auto e = p.extension().string();
-                if (!_extensions.contains(e)) return;
-            }
-            std::tuple<uintmax_t, std::string> h;
-            if (!_get_hash_of_file(p, h, ec))
-            {
-                if (ec && _scan_error_callback) _scan_error_callback(search_dir, dirent, ec.default_error_condition());
-                return;
-            }
-
-            //std::cout << "Hash key of " << p << " " << std::get<0>(h) << " " << std::get<1>(h) << std::endl;
-
-            _list_lock.lock();
-            _files_examined++;
-            if (_sets.contains(h))
-            {
-                _sets.at(h).emplace(p);// .insert(p);
-                // Raise the callback.
-                if (_sets.at(h).size() == 2)
-                {
-                    _sets_found++;
-                    if (_scan_progress_callback) _scan_progress_callback(search_dir, _files_examined, _sets_found);
-                }
-            }
-            else
-            {
-                auto result = _sets.emplace(std::make_pair(h, std::set<std::filesystem::path, filename_sort>()));
-                if (result.second) result.first->second.emplace(p);
-            }
-            _list_lock.unlock();
-        }
-
-        template<typename DirIterT> //requires std::is_same<std::filesystem::directory_iterator, DirIterT>
-        void _build_list(const DirIterT& iter, const std::filesystem::path& search_dir)
-        {
-            for (const auto& dirent : iter)
-            {
-                std::thread t([dirent, search_dir, this] { _add_file(dirent.path(), search_dir); });
-                _threads.push_front(std::move(t));
-            }
-        }
+        } */
 
     public:
-        typedef std::map<std::tuple<uintmax_t, std::string>, std::set<std::filesystem::path, filename_sort>>::size_type size_type;
-        typedef std::set<std::filesystem::path, filename_sort> value_type;
+        typedef typename map_t ::size_type size_type;
+        typedef set_t value_type;
         typedef value_type& reference;
         typedef const value_type& const_reference;
-        typedef std::map<std::tuple<uintmax_t, std::string>, std::set<std::filesystem::path, filename_sort>>::difference_type difference_type;
+        typedef typename map_t ::difference_type difference_type;
         typedef value_type * pointer;
         typedef const pointer const_pointer;
-
-        using map_t = std::map<std::tuple<uintmax_t, std::string>, std::set<std::filesystem::path, filename_sort>>;
 
         template<typename IterT>
         class basic_iterator
         {
         private:
-            using value_t = typename map_t::mapped_type;
             IterT under;
         public:
             typedef std::bidirectional_iterator_tag iterator_category;
-            typedef std::set<std::filesystem::path, filename_sort> value_type;
-            typedef std::map<std::tuple<uintmax_t, std::string>, std::set<std::filesystem::path, filename_sort>>::difference_type difference_type;
+            typedef set_t value_type;
+            typedef typename map_t::difference_type difference_type;
             typedef value_type& reference;
             typedef value_type * pointer;
 
@@ -252,10 +173,10 @@ namespace oasis::filesystem
             }
         };
 
-        typedef basic_iterator<map_t::iterator> iterator;
-        typedef basic_iterator<map_t::const_iterator> const_iterator;
-        typedef basic_iterator<map_t::reverse_iterator> reverse_iterator;
-        typedef basic_iterator<map_t::const_reverse_iterator> const_reverse_iterator;
+        typedef basic_iterator<typename map_t::iterator> iterator;
+        typedef basic_iterator<typename map_t::const_iterator> const_iterator;
+        typedef basic_iterator<typename map_t::reverse_iterator> reverse_iterator;
+        typedef basic_iterator<typename map_t::const_reverse_iterator> const_reverse_iterator;
 
         iterator begin() noexcept
         {
@@ -332,29 +253,39 @@ namespace oasis::filesystem
             _sets.clear();
         }
 
-        void set_scan_started_callback(const std::function<void(const std::filesystem::path&)>& callback)
+        void set_scan_started_callback(const std::function<void(const boost::filesystem::path&)>& callback)
         {
             _scan_started_callback = callback;
         }
 
-        void set_scan_progress_callback(const std::function<void(const std::filesystem::path&, uintmax_t, uintmax_t)>& callback)
+        void set_scan_progress_callback(const std::function<void(const boost::filesystem::path&, uintmax_t, uintmax_t)>& callback)
         {
             _scan_progress_callback = callback;
         }
 
-        void set_scan_completed_callback(const std::function<void(const std::filesystem::path&, uintmax_t, uintmax_t)>& callback)
+        void set_scan_completed_callback(const std::function<void(const boost::filesystem::path&, uintmax_t, uintmax_t, uintmax_t, uintmax_t)>& callback)
         {
             _scan_completed_callback = callback;
         }
 
-        void set_scan_error_callback(const std::function<void(const std::filesystem::path&, const std::filesystem::path&, const std::error_condition&)>& callback)
+        void set_scan_error_callback(const std::function<void(const boost::filesystem::path&, const boost::filesystem::path&, const std::error_condition&)>& callback)
         {
             _scan_error_callback = callback;
         }
 
-        [[nodiscard]] uintmax_t sets_found() const
+        [[nodiscard]] uintmax_t set_count() const
         {
-            return _sets_found;
+            return _sets.size();
+        }
+
+        [[nodiscard]] uintmax_t file_count() const
+        {
+            return _file_count;
+        }
+
+        [[nodiscard]] uintmax_t space_occupied() const
+        {
+            return _space_occupied;
         }
 
         duplicate_files_scanner& operator=(duplicate_files_scanner&& other) noexcept
@@ -363,21 +294,45 @@ namespace oasis::filesystem
             _follow_links = other._follow_links;
             _remove_single = other._remove_single;
             _files_examined = other._files_examined;
-            _sets_found = other._sets_found;
             _extensions = std::move(other._extensions);
+            _file_count = other._file_count;
+            _space_occupied = other._space_occupied;
 
             return *this;
         }
 
-        duplicate_files_scanner& operator=(const duplicate_files_scanner&) = delete;
+        duplicate_files_scanner& operator=(const duplicate_files_scanner& other)
+        {
+            _sets = other._sets;
+            _follow_links = other._follow_links;
+            _remove_single = other._remove_single;
+            _files_examined = other._files_examined;
+            _extensions = other._extensions;
+            _file_count = other._file_count;
+            _space_occupied = other._space_occupied;
 
-        duplicate_files_scanner() : directory_scanner()
+            return *this;
+        }
+
+        explicit duplicate_files_scanner(const boost::filesystem::path& p) : directory_scanner(p)
         {
             _remove_single = true;
+            _file_count = 0;
+            _space_occupied = 0;
             _sets_found = 0;
         }
 
-        duplicate_files_scanner(const duplicate_files_scanner& other) = delete;
+        duplicate_files_scanner(const duplicate_files_scanner& other) : directory_scanner(other)
+        {
+            _sets = other._sets;
+            _follow_links = other._follow_links;
+            _remove_single = other._remove_single;
+            _files_examined = other._files_examined;
+            _extensions = other._extensions;
+            _file_count = other._file_count;
+            _space_occupied = other._space_occupied;
+            _sets_found = 0;
+        }
 
         duplicate_files_scanner(duplicate_files_scanner&& other) noexcept
         {
@@ -385,54 +340,259 @@ namespace oasis::filesystem
             _follow_links = other._follow_links;
             _remove_single = other._remove_single;
             _files_examined = other._files_examined;
-            _sets_found = other._sets_found;
             _extensions = std::move(other._extensions);
+            _file_count = other._file_count;
+            _space_occupied = other._space_occupied;
+            _sets_found = 0;
         }
 
-        void perform_scan(const std::filesystem::path& search_dir, bool recursive) override
+        void perform_scan(bool recursive) override;
+
+    };
+
+    template<typename SorterT>
+    void duplicate_files_scanner<SorterT>::perform_scan(bool recursive)
+    {
+        if (_scan_started_callback) _scan_started_callback(_search_dir);
+
+        std::error_code sec;
+        directory_enumerator de(_search_dir);
+        while (de.move_next(sec))
         {
-            if (search_dir.empty()) throw std::invalid_argument("Invalid search path");
-            std::filesystem::path abs_search_dir = std::filesystem::canonical(search_dir);
-            if (!std::filesystem::exists(abs_search_dir)) throw std::invalid_argument("Search path does not exist.");
-            if (!std::filesystem::is_directory(abs_search_dir)) throw std::invalid_argument("Search path is not a directory");
+            _process_file(de.current(), recursive);
+        }
+        if (sec && _scan_error_callback) _scan_error_callback(_search_dir, boost::filesystem::path(), sec.default_error_condition());
 
-            std::filesystem::directory_options opts = std::filesystem::directory_options::skip_permission_denied;
-            if (_follow_links) opts |= std::filesystem::directory_options::follow_directory_symlink;
-
-            if (_scan_started_callback) _scan_started_callback(abs_search_dir);
-
-            if (recursive)
+        // Work out the statistics.
+        boost::system::error_code ec;
+        std::set<std::tuple<uintmax_t, std::string>> del_list;
+        for (const auto& k : _sets)
+        {
+            if (k.second.size() == 1 && _remove_single)
             {
-                std::filesystem::recursive_directory_iterator iter(abs_search_dir, opts);
-                _build_list(iter, abs_search_dir);
+                del_list.insert(k.first);
+                continue;
+            }
+            _file_count += k.second.size();
+            boost::filesystem::path px = *(k.second.begin());
+            _space_occupied += boost::filesystem::file_size(px, ec);
+            if (ec && _scan_error_callback) _scan_error_callback(_search_dir, px, ec.default_error_condition());
+        }
+        if (_remove_single)
+        {
+            for (const auto& kr: del_list)
+            {
+                _sets.erase(kr);
+            }
+        }
+
+        if (_scan_completed_callback) _scan_completed_callback(_search_dir, _files_examined, _file_count, _sets.size(), _space_occupied);
+    }
+
+    template<typename SorterT>
+    void duplicate_files_scanner<SorterT>::_process_file(const boost::filesystem::path& dirent, bool recurse)
+    {
+        boost::system::error_code ec;
+        boost::filesystem::path p;
+        bool hidden = is_hidden(dirent, ec);
+        if (ec)
+        {
+            if (_scan_error_callback) _scan_error_callback(_search_dir, dirent, ec.default_error_condition());
+            return;
+        }
+        bool symlink = boost::filesystem::is_symlink(dirent, ec);
+        if (ec)
+        {
+            if (_scan_error_callback) _scan_error_callback(_search_dir, dirent, ec.default_error_condition());
+            return;
+        }
+
+        if (_skip_hidden && hidden) return;
+
+        if (symlink)
+        {
+            if (_follow_links)
+            {
+                p = boost::filesystem::canonical(dirent, ec);
+                if (ec)
+                {
+                    if (_scan_error_callback) _scan_error_callback(_search_dir, dirent, ec.default_error_condition());
+                    return;
+                }
             }
             else
             {
-                std::filesystem::directory_iterator iter(abs_search_dir, opts);
-                _build_list(iter, abs_search_dir);
+                return;
             }
-
-            for (std::thread& t : _threads)
-            {
-                if (t.joinable()) t.join();
-            }
-
-            if (_remove_single)
-            {
-                std::set<std::tuple<uintmax_t, std::string>> del_list;
-                for (const auto& k : _sets)
-                {
-                    if (k.second.size() == 1) del_list.insert(k.first);
-                }
-                for (const auto& kr: del_list)
-                {
-                    _sets.erase(kr);
-                }
-            }
-
-            if (_scan_completed_callback) _scan_completed_callback(abs_search_dir, _files_examined, _sets_found);
         }
-    };
+        else
+        {
+            p = boost::filesystem::canonical(dirent, ec);
+            if (ec)
+            {
+                if (_scan_error_callback) _scan_error_callback(_search_dir, dirent, ec.default_error_condition());
+                return;
+            }
+        }
+
+        if (!boost::filesystem::exists(p, ec) && !ec) return;
+        if (ec)
+        {
+            if (_scan_error_callback) _scan_error_callback(_search_dir, p, ec.default_error_condition());
+            return;
+        }
+
+        // ---------------------------------------------------------------------------------------------------------
+        // Directory.
+        // ---------------------------------------------------------------------------------------------------------
+        bool directory = boost::filesystem::is_directory(p, ec);
+        if (ec)
+        {
+            if (_scan_error_callback) _scan_error_callback(_search_dir, p, ec.default_error_condition());
+            return;
+        }
+        std::error_code sec;
+        if (directory)
+        {
+            directory_enumerator de(p);
+            while (de.move_next(sec))
+            {
+                _process_file(de.current(), recurse);
+            }
+            if (sec && _scan_error_callback) _scan_error_callback(_search_dir, p, sec.default_error_condition());
+        }
+
+        // ---------------------------------------------------------------------------------------------------------
+        // File.
+        // ---------------------------------------------------------------------------------------------------------
+        if (!boost::filesystem::is_regular_file(p, ec) && !ec) return;
+        if (ec)
+        {
+            if (_scan_error_callback) _scan_error_callback(_search_dir, p, ec.default_error_condition());
+            return;
+        }
+        if (!_extensions.empty())
+        {
+            auto e = p.extension().string();
+            if (!_extensions.contains(e)) return;
+        }
+        std::tuple<uintmax_t, std::string> h;
+        if (!_get_hash_of_file(p, h, ec))
+        {
+            if (ec && _scan_error_callback) _scan_error_callback(_search_dir, p, ec.default_error_condition());
+            return;
+        }
+
+        //std::cout << "Hash key of " << p << " " << std::get<0>(h) << " " << std::get<1>(h) << std::endl;
+
+        _list_lock.lock();
+        _files_examined++;
+        if (_sets.contains(h))
+        {
+            _sets.at(h).emplace(p);
+            if (_sets.at(h).size() == 2) _sets_found++;
+        }
+        else
+        {
+            auto result = _sets.emplace(std::make_pair(h, set_t()));
+            if (result.second) result.first->second.emplace(p);
+        }
+        if (_scan_progress_callback) _scan_progress_callback(_search_dir, _files_examined, _sets_found);
+        _list_lock.unlock();
+    }
+
+    template<typename SorterT>
+    bool duplicate_files_scanner<SorterT>::_get_hash_of_file(const boost::filesystem::path& p, std::tuple<std::uintmax_t, std::string>& out, boost::system::error_code& ec)
+    {
+        ec.clear();
+        std::unique_ptr<uint8_t> _buffer;
+        auto s = boost::filesystem::file_size(p, ec);
+        if (ec) return false;
+        if ((s < _min_size) || (s > _max_size)) return false;
+
+        size_t buffer_size = (s < 10485760) ? s : 10485760;
+        _buffer = std::unique_ptr<uint8_t>(new uint8_t[buffer_size]);
+
+        static constexpr char hex[] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'};
+        Botan::Skein_512 hasher;
+        auto digest_length = hasher.output_length();
+
+        // Try to open the file.
+        FILE *file = nullptr;
+        for (;;)
+        {
+            file = fopen(p.string().c_str(), "rb");
+            if (file == nullptr)
+            {
+                if ((errno == ENFILE) || (errno == EMFILE) || (errno == ENOSR) || (errno == EAGAIN))
+                {
+                    boost::this_thread::sleep_for(boost::chrono::seconds(5));
+                    continue;
+                }
+                else
+                {
+                    if (errno) std::cerr << strerror(errno) << std::endl;
+                    ec = boost::system::error_code(errno, boost::system::system_category());
+                    return false;
+                }
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        std::string result;
+        result.reserve(digest_length * 2);   // Two digits per character
+        // If the contents of the file will fit inside the hash string then we can save a pointless hashing operation.
+        if (s <= digest_length)
+        {
+            result.insert(0, (digest_length * 2), '0');
+            auto bytes_read = fread(_buffer.get(), 1, s, file);
+            if (bytes_read != s)
+            {
+                if (errno) std::cerr << strerror(errno) << std::endl;
+                ec = boost::system::error_code(errno, boost::system::system_category());
+                fclose(file);
+                return false;
+            }
+            auto temp = _buffer.get();
+            auto it = result.begin();
+            for (size_t i = 0; i < s; i++)
+            {
+                auto c = temp[i];
+                *it = hex[c / 16];
+                it++;
+                *it = hex[c % 16];
+            }
+        }
+        else
+        {
+            while (!feof(file))
+            {
+                auto bytes_read = fread(_buffer.get(), 1, buffer_size, file);
+                if (bytes_read == 0)
+                {
+                    if (errno) std::cerr << strerror(errno) << std::endl;
+                    ec = boost::system::error_code(errno, boost::system::system_category());
+                    fclose(file);
+                    return false;
+                }
+                hasher.update(_buffer.get(), bytes_read);
+            }
+            auto digest = hasher.final_stdvec();
+
+            for (uint8_t c : digest)
+            {
+                result.push_back(hex[c / 16]);
+                result.push_back(hex[c % 16]);
+            }
+        }
+        fclose(file);
+        out = std::make_tuple(s, result);
+
+        return true;
+    }
 }
 
 #endif

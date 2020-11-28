@@ -1,6 +1,6 @@
 #include <stdexcept>
 #include <algorithm>
-#include <filesystem>
+#include <boost/filesystem.hpp>
 #include <map>
 #include <set>
 #include <string>
@@ -14,42 +14,6 @@
 
 namespace oasis
 {
-    namespace _private
-    {
-#if defined(_WIN32)
-#define PLATFORM_NAME "windows" // Windows
-#elif defined(_WIN64)
-#define PLATFORM_NAME "windows" // Windows
-#elif defined(__CYGWIN__) && !defined(_WIN32)
-#define PLATFORM_NAME "windows" // Windows (Cygwin POSIX under Microsoft Window)
-#elif defined(__ANDROID__)
-#define PLATFORM_NAME "android" // Android (implies Linux, so it must come first)
-#elif defined(__linux__)
-#define PLATFORM_NAME "linux" // Debian, Ubuntu, Gentoo, Fedora, openSUSE, RedHat, Centos and other
-#elif defined(__unix__) || !defined(__APPLE__) && defined(__MACH__)
-        #include <sys/param.h>
-    #if defined(BSD)
-        #define PLATFORM_NAME "bsd" // FreeBSD, NetBSD, OpenBSD, DragonFly BSD
-    #endif
-#elif defined(__hpux)
-    #define PLATFORM_NAME "hp-ux" // HP-UX
-#elif defined(_AIX)
-    #define PLATFORM_NAME "aix" // IBM AIX
-#elif defined(__APPLE__) && defined(__MACH__) // Apple OSX and iOS (Darwin)
-    #include <TargetConditionals.h>
-    #if TARGET_IPHONE_SIMULATOR == 1
-        #define PLATFORM_NAME "ios" // Apple iOS
-    #elif TARGET_OS_IPHONE == 1
-        #define PLATFORM_NAME "ios" // Apple iOS
-    #elif TARGET_OS_MAC == 1
-        #define PLATFORM_NAME "osx" // Apple OSX
-    #endif
-#elif defined(__sun) && defined(__SVR4)
-    #define PLATFORM_NAME "solaris" // Oracle Solaris, Open Indiana
-#else
-    #define PLATFORM_NAME NULL
-#endif
-    }
     enum class operation_state
     {
         imminent,
@@ -175,49 +139,66 @@ namespace oasis
 
     namespace filesystem
     {
-        struct last_write_sort
+        struct sort_by_creation_time
         {
-            bool operator()(const std::filesystem::path& lhs, const std::filesystem::path& rhs) const
+            bool operator()(const boost::filesystem::path& lhs, const boost::filesystem::path& rhs) const
             {
-                std::error_code ec;
+                boost::system::error_code ec;
                 if (lhs.empty() || rhs.empty()) return false;
-                if (std::filesystem::equivalent(lhs, rhs, ec)) return false;
-                auto t1 = std::filesystem::last_write_time(lhs);
-                auto t2 = std::filesystem::last_write_time(rhs);
+                if (boost::filesystem::equivalent(lhs, rhs, ec)) return false;
+                if (ec) return false;
+                auto t1 = boost::filesystem::creation_time(lhs);
+                auto t2 = boost::filesystem::creation_time(rhs);
 
                 return (t1 < t2);
             }
-        } sort_by_last_write_time;
+        };
 
-        struct file_size_sort
+        struct sort_by_last_write_time
         {
-            bool operator()(const std::filesystem::path& lhs, const std::filesystem::path& rhs) const
+            bool operator()(const boost::filesystem::path& lhs, const boost::filesystem::path& rhs) const
             {
-                std::error_code ec;
+                boost::system::error_code ec;
                 if (lhs.empty() || rhs.empty()) return false;
-                if (std::filesystem::equivalent(lhs, rhs, ec)) return false;
-                auto s1 = std::filesystem::file_size(lhs);
-                auto s2 = std::filesystem::file_size(rhs);
+                if (boost::filesystem::equivalent(lhs, rhs, ec)) return false;
+                if (ec) return false;
+                auto t1 = boost::filesystem::last_write_time(lhs);
+                auto t2 = boost::filesystem::last_write_time(rhs);
+
+                return (t1 < t2);
+            }
+        };
+
+        struct sort_by_file_size
+        {
+            bool operator()(const boost::filesystem::path& lhs, const boost::filesystem::path& rhs) const
+            {
+                boost::system::error_code ec;
+                if (lhs.empty() || rhs.empty()) return false;
+                if (boost::filesystem::equivalent(lhs, rhs, ec)) return false;
+                if (ec) return false;
+                auto s1 = boost::filesystem::file_size(lhs);
+                auto s2 = boost::filesystem::file_size(rhs);
 
                 return (s1 < s2);
             }
-        } sort_by_file_size;
+        };
 
-        class filename_sort
+        class sort_by_filename
         {
         private:
             boost::wregex re;
         public:
-            filename_sort()
+            sort_by_filename()
             {
                 re.assign(L"(?:[\\(\\[{_])(\\d+)(?:[\\)\\]}_])", boost::regex::icase);
             }
 
-            bool operator()(const std::filesystem::path& lhs, const std::filesystem::path& rhs) const
+            bool operator()(const boost::filesystem::path& lhs, const boost::filesystem::path& rhs) const
             {
-                std::error_code ec;
+                boost::system::error_code ec;
                 if (lhs.empty() || rhs.empty()) return false;
-                if (std::filesystem::equivalent(lhs, rhs, ec)) return false;
+                if (boost::filesystem::equivalent(lhs, rhs, ec)) return false;
                 if (ec) return false;
                 auto n1 = lhs.filename().wstring();
                 auto n2 = rhs.filename().wstring();
@@ -227,6 +208,7 @@ namespace oasis
                 boost::wsmatch fn2;
                 bool n1_has_num = boost::regex_search(n1, fn1, re);
                 bool n2_has_num = boost::regex_search(n2, fn2, re);
+
                 if (n1_has_num && n2_has_num)
                 {
                     unsigned long num1 = std::stoull(fn1[1]);
@@ -234,28 +216,31 @@ namespace oasis
 
                     return (num1 < num2);
                 }
+
                 if (n1_has_num && !n2_has_num) return false;
                 if (!n1_has_num && n2_has_num) return true;
 
-                // Check for substrings
-                if (n1.size() < n2.size()) return boost::icontains(n2, n1);
-
                 return boost::ilexicographical_compare(n1, n2);
             }
-        } sort_by_filename;
+        };
 
         class directory_scanner
         {
         protected:
             bool _follow_links;
-            std::set<std::filesystem::path> _extensions;
+            std::set<boost::filesystem::path> _extensions;
             size_t _min_size;
             size_t _max_size;
             bool _skip_hidden;
             uintmax_t _files_examined;
+            boost::filesystem::path _search_dir;
         public:
-            directory_scanner()
+            directory_scanner(const boost::filesystem::path& p)
             {
+                if (p.empty()) throw std::invalid_argument("Invalid search path");
+                _search_dir = boost::filesystem::canonical(p);
+                if (!boost::filesystem::exists(_search_dir)) throw std::system_error(EEXIST, std::generic_category());
+                if (!boost::filesystem::is_directory(_search_dir)) throw std::invalid_argument("Search path is not a directory");
                 _follow_links = false;
                 _files_examined = 0;
                 _min_size = 0;
@@ -265,7 +250,7 @@ namespace oasis
 
             virtual void clear() noexcept = 0;
 
-            virtual void perform_scan(const std::filesystem::path& search_dir, bool recursive) = 0;
+            virtual void perform_scan(bool recursive) = 0;
 
             virtual std::size_t size() const noexcept = 0;
 
@@ -353,7 +338,7 @@ namespace oasis
                 add_filter(f);
             }
 
-            [[nodiscard]] const std::set<std::filesystem::path>& filters() const noexcept
+            [[nodiscard]] const std::set<boost::filesystem::path>& filters() const noexcept
             {
                 return _extensions;
             }
@@ -364,7 +349,7 @@ namespace oasis
             }
         };
 
-        bool is_hidden(const std::filesystem::path& p)
+        bool is_hidden(const boost::filesystem::path& p)
         {
             bool ret = false;
             if (p.empty()) throw std::invalid_argument("The given path was empty.");
@@ -374,14 +359,14 @@ namespace oasis
             return ret;
         }
 
-        bool is_hidden(const std::filesystem::path& p, std::error_code& ec) noexcept
+        bool is_hidden(const boost::filesystem::path& p, boost::system::error_code& ec) noexcept
         {
             ec.clear();
 
             bool ret = false;
             if (p.empty())
             {
-                ec = std::make_error_code(std::errc::invalid_argument);
+                ec = boost::system::errc::make_error_code(boost::system::errc::invalid_argument);
                 return false;
             }
             auto fn = p.filename().wstring();
