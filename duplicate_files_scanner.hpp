@@ -44,67 +44,6 @@ namespace oasis::filesystem
         bool _get_hash_of_file(const boost::filesystem::path& p, std::tuple<std::uintmax_t, std::string>& out, boost::system::error_code& ec);
         void _process_file(const boost::filesystem::path& dirent, bool recurse);
 
-
-        /*void _search_directory(const boost::filesystem::path& dir, bool recursive)
-        {
-            boost::system::error_code ec;
-            if (dir.empty()) return;
-            bool exists = boost::filesystem::exists(dir, ec);
-            if (ec)
-            {
-                if (_scan_error_callback) _scan_error_callback(dir, boost::filesystem::path(), ec.default_error_condition());
-                return;
-            }
-            bool is_dir = boost::filesystem::is_directory(dir, ec);
-            if (ec)
-            {
-                if (_scan_error_callback) _scan_error_callback(dir, boost::filesystem::path(), ec.default_error_condition());
-                return;
-            }
-            bool hidden = is_hidden(dir, ec);
-            if (ec)
-            {
-                if (_scan_error_callback) _scan_error_callback(dir, boost::filesystem::path(), ec.default_error_condition());
-                return;
-            }
-            if (_skip_hidden && hidden) return;
-            if (!exists) return;
-            if (!is_dir) return;
-
-            boost::filesystem::directory_options opts = boost::filesystem::directory_options::skip_permission_denied | boost::filesystem::directory_options::skip_dangling_symlinks;
-            if (_follow_links) opts |= boost::filesystem::directory_options::follow_directory_symlink;
-            boost::filesystem::directory_iterator iter(dir, opts);
-            std::forward_list<boost::filesystem::path> files;
-
-            if (_scan_progress_callback) _scan_progress_callback(dir, _files_examined, _sets_found);
-
-            for (const auto& dirent : iter)
-            {
-                const auto& p = dirent.path();
-                is_dir = boost::filesystem::is_directory(p, ec);
-                if (ec)
-                {
-                    if (_scan_error_callback) _scan_error_callback(dir, boost::filesystem::path(), ec.default_error_condition());
-                    return;
-                }
-
-                if (is_dir && recursive)
-                {
-                    // _threads.create_thread([p, recursive, this] { _search_directory(p, recursive); });
-                    _search_directory(p, recursive);
-                }
-                else
-                {
-                    files.push_front(p);
-                }
-            }
-
-            for (const auto& f : files)
-            {
-                _add_file(f, dir);
-            }
-        } */
-
     public:
         typedef typename map_t ::size_type size_type;
         typedef set_t value_type;
@@ -293,7 +232,7 @@ namespace oasis::filesystem
             _sets = std::move(other._sets);
             _follow_links = other._follow_links;
             _remove_single = other._remove_single;
-            _files_examined = other._files_examined;
+            _files_encountered = other._files_encountered;
             _extensions = std::move(other._extensions);
             _file_count = other._file_count;
             _space_occupied = other._space_occupied;
@@ -306,7 +245,7 @@ namespace oasis::filesystem
             _sets = other._sets;
             _follow_links = other._follow_links;
             _remove_single = other._remove_single;
-            _files_examined = other._files_examined;
+            _files_encountered = other._files_encountered;
             _extensions = other._extensions;
             _file_count = other._file_count;
             _space_occupied = other._space_occupied;
@@ -327,7 +266,7 @@ namespace oasis::filesystem
             _sets = other._sets;
             _follow_links = other._follow_links;
             _remove_single = other._remove_single;
-            _files_examined = other._files_examined;
+            _files_encountered = other._files_encountered;
             _extensions = other._extensions;
             _file_count = other._file_count;
             _space_occupied = other._space_occupied;
@@ -339,7 +278,7 @@ namespace oasis::filesystem
             _sets = std::move(other._sets);
             _follow_links = other._follow_links;
             _remove_single = other._remove_single;
-            _files_examined = other._files_examined;
+            _files_encountered = other._files_encountered;
             _extensions = std::move(other._extensions);
             _file_count = other._file_count;
             _space_occupied = other._space_occupied;
@@ -386,7 +325,7 @@ namespace oasis::filesystem
             }
         }
 
-        if (_scan_completed_callback) _scan_completed_callback(_search_dir, _files_examined, _file_count, _sets.size(), _space_occupied);
+        if (_scan_completed_callback) _scan_completed_callback(_search_dir, _files_encountered, _file_count, _sets.size(), _space_occupied);
     }
 
     template<typename SorterT>
@@ -476,6 +415,7 @@ namespace oasis::filesystem
             auto e = p.extension().string();
             if (!_extensions.contains(e)) return;
         }
+        _files_encountered++;
         std::tuple<uintmax_t, std::string> h;
         if (!_get_hash_of_file(p, h, ec))
         {
@@ -486,7 +426,6 @@ namespace oasis::filesystem
         //std::cout << "Hash key of " << p << " " << std::get<0>(h) << " " << std::get<1>(h) << std::endl;
 
         _list_lock.lock();
-        _files_examined++;
         if (_sets.contains(h))
         {
             _sets.at(h).emplace(p);
@@ -497,7 +436,7 @@ namespace oasis::filesystem
             auto result = _sets.emplace(std::make_pair(h, set_t()));
             if (result.second) result.first->second.emplace(p);
         }
-        if (_scan_progress_callback) _scan_progress_callback(_search_dir, _files_examined, _sets_found);
+        if (_scan_progress_callback) _scan_progress_callback(_search_dir, _files_encountered, _sets_found);
         _list_lock.unlock();
     }
 
@@ -531,7 +470,6 @@ namespace oasis::filesystem
                 }
                 else
                 {
-                    if (errno) std::cerr << strerror(errno) << std::endl;
                     ec = boost::system::error_code(errno, boost::system::system_category());
                     return false;
                 }
@@ -551,7 +489,6 @@ namespace oasis::filesystem
             auto bytes_read = fread(_buffer.get(), 1, s, file);
             if (bytes_read != s)
             {
-                if (errno) std::cerr << strerror(errno) << std::endl;
                 ec = boost::system::error_code(errno, boost::system::system_category());
                 fclose(file);
                 return false;
@@ -573,7 +510,6 @@ namespace oasis::filesystem
                 auto bytes_read = fread(_buffer.get(), 1, buffer_size, file);
                 if (bytes_read == 0)
                 {
-                    if (errno) std::cerr << strerror(errno) << std::endl;
                     ec = boost::system::error_code(errno, boost::system::system_category());
                     fclose(file);
                     return false;

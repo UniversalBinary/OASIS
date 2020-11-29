@@ -232,7 +232,7 @@ namespace oasis
             size_t _min_size;
             size_t _max_size;
             bool _skip_hidden;
-            uintmax_t _files_examined;
+            uintmax_t _files_encountered;
             boost::filesystem::path _search_dir;
         public:
             directory_scanner(const boost::filesystem::path& p)
@@ -242,7 +242,7 @@ namespace oasis
                 if (!boost::filesystem::exists(_search_dir)) throw std::system_error(EEXIST, std::generic_category());
                 if (!boost::filesystem::is_directory(_search_dir)) throw std::invalid_argument("Search path is not a directory");
                 _follow_links = false;
-                _files_examined = 0;
+                _files_encountered = 0;
                 _min_size = 0;
                 _max_size = SIZE_MAX;
                 _skip_hidden = false;
@@ -345,7 +345,7 @@ namespace oasis
 
             [[nodiscard]] uintmax_t files_examined() const noexcept
             {
-                return _files_examined;
+                return _files_encountered;
             }
         };
 
