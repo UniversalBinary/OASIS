@@ -13,7 +13,7 @@
 #include <botan/skein_512.h>
 #include <boost/algorithm/string.hpp>
 #include <boost/regex.hpp>
-#include "base.hpp"
+#include "foundation.hpp"
 #include "directory_enumerator.hpp"
 
 #ifndef _DUPLICATE_SCANNER_LIST_HPP_
@@ -290,20 +290,19 @@ namespace oasis::filesystem
     };
 
     template<typename SorterT>
-    void duplicate_files_scanner<SorterT>::perform_scan(bool recursive)
+    void duplicate_files_scanner<SorterT>::perform_scan(bool recurse)
     {
         if (_scan_started_callback) _scan_started_callback(_search_dir);
 
-        std::error_code sec;
+        boost::system::error_code ec;
         directory_enumerator de(_search_dir);
-        while (de.move_next(sec))
+        while (de.move_next(ec))
         {
-            _process_file(de.current(), recursive);
+            _process_file(de.current(), recurse);
         }
-        if (sec && _scan_error_callback) _scan_error_callback(_search_dir, boost::filesystem::path(), sec.default_error_condition());
+        if (ec && _scan_error_callback) _scan_error_callback(_search_dir, boost::filesystem::path(), ec.default_error_condition());
 
         // Work out the statistics.
-        boost::system::error_code ec;
         std::set<std::tuple<uintmax_t, std::string>> del_list;
         for (const auto& k : _sets)
         {
@@ -390,7 +389,7 @@ namespace oasis::filesystem
             if (_scan_error_callback) _scan_error_callback(_search_dir, p, ec.default_error_condition());
             return;
         }
-        std::error_code sec;
+        boost::system::error_code sec;
         if (directory)
         {
             directory_enumerator de(p);
@@ -423,7 +422,7 @@ namespace oasis::filesystem
             return;
         }
 
-        //std::cout << "Hash key of " << p << " " << std::get<0>(h) << " " << std::get<1>(h) << std::endl;
+        std::cout << "Hash key of " << p << " " << std::get<0>(h) << " " << std::get<1>(h) << std::endl;
 
         _list_lock.lock();
         if (_sets.contains(h))

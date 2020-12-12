@@ -8,6 +8,14 @@
 #include <boost/regex.h>
 #include <fmt/format.h>
 #include <cmath>
+#include <cerrno>
+#if defined(_MSC_VER)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN 
+#endif 
+#include <windows.h>
+#include "win32_error.hpp"
+#endif
 
 #ifndef _BASE_HPP_
 #define _BASE_HPP_
@@ -20,6 +28,12 @@ namespace oasis
         underway,
         complete,
     };
+
+    /**********************************************************************************************//**
+     * @class	invalid_operation
+     *
+     * @brief	An invalid operation.
+     **************************************************************************************************/
 
     class invalid_operation : std::runtime_error
     {
@@ -35,8 +49,20 @@ namespace oasis
         }
     };
 
+    /**********************************************************************************************//**
+     * @fn	template<typename StringT> inline StringT cleanup_spaces(StringT& str)
+     *
+     * @brief	Cleans up a string by removing all repeated sequences of spaces and replacing any
+     * 			underscore characters with a space.
+     *
+     * @tparam	StringT	A character container type, e.g. std::string or std::wstring.
+     * @param [in,out]	str	The string to be cleaned up.
+     *
+     * @returns	A reference to the cleaned string.
+     **************************************************************************************************/
+
     template<typename StringT>
-    inline StringT cleanup_spaces(StringT& str)
+    inline StringT& cleanup_spaces(StringT& str)
     {
         if (str.empty()) return str;
         boost::trim(str);
@@ -49,10 +75,18 @@ namespace oasis
         return str;
     }
 
-    /// Determines if str is a number in the Arabic (decimal) numbering system.
-    /// \tparam StringT A character container type, e.g. std::string or std::wstring.
-    /// \param str The string to examine.
-    /// \return Returns true if str contains a number in the Arabic (decimal) numbering system; otherwise false.
+    /**********************************************************************************************//**
+     * @fn	template<typename StringT> inline bool are_arabic_numerals(const StringT& str)
+     *
+     * @brief	Determines if str is a number in the Arabic (decimal) numbering system.
+     *
+     * @tparam	StringT	A character container type, e.g. std::string or std::wstring.
+     * @param 	str	The string to examine.
+     *
+     * @returns	true if str contains a number in the Arabic (decimal) numbering system; otherwise
+     * 			false.
+     **************************************************************************************************/
+
     template<typename StringT>
     inline bool are_arabic_numerals(const StringT& str)
     {
@@ -64,10 +98,17 @@ namespace oasis
         return std::all_of(str.begin(), str.end(), [](auto c) { return ((c >= '0') && (c <= '9')); });
     }
 
-    /// Determines if str is a number in the Roman numbering system.
-    /// \tparam StringT A character container type, e.g. std::string or std::wstring.
-    /// \param str The string to examine.
-    /// \return Returns true if str contains a number in the Roman numbering numbering system; otherwise false.
+    /**********************************************************************************************//**
+     * @fn	template<typename StringT> inline bool are_roman_numerals(const StringT& str)
+     *
+     * @brief	Determines if str is a number in the Roman numbering system.
+     *
+     * @tparam	StringT	A character container type, e.g. std::string or std::wstring.
+     * @param 	str	The string to examine.
+     *
+     * @returns	true if str contains a number in the Roman numbering system; otherwise false.
+     **************************************************************************************************/
+
     template<typename StringT>
     inline bool are_roman_numerals(const StringT& str)
     {
@@ -79,10 +120,18 @@ namespace oasis
         return std::all_of(str.begin(), str.end(), [](auto c) { return ((c == 'C') || (c == 'D') || (c == 'I') || (c == 'L') || (c == 'M') || (c == 'V') || (c == 'X')); });
     }
 
-    /// Converts a string containing a number in Roman numerals to its integer representation.
-    /// \tparam StringT A character container type, e.g. std::string or std::wstring.
-    /// \param str The string to examine.
-    /// \return
+    /**********************************************************************************************//**
+     * @fn	template<typename StringT> inline int roman_to_int(const StringT& str)
+     *
+     * @brief	Converts a string containing a number in Roman numerals to its integer representation.
+     *
+     * @tparam	StringT	A character container type, e.g. std::string or std::wstring.
+     * @param 	str	A string containing a number in roman numerals.
+     *
+     * @returns	An integer representation of the roman numeral contained in str, or zero if str does
+     * 			not contain a valid roman numeral.
+     **************************************************************************************************/
+
     template<typename StringT>
     inline int roman_to_int(const StringT& str)
     {
@@ -113,21 +162,47 @@ namespace oasis
         return total;
     }
 
-    template<typename StringT1>
+    /**********************************************************************************************//**
+     * @class	basic_number_formatter
+     *
+     * @brief	A functor for use with boost::regex_replace()
+     *
+     * @tparam	StringT	A character container type, e.g. std::string or std::wstring.
+     **************************************************************************************************/
+
+    template<typename StringT>
     class basic_number_formatter
     {
     private:
-        StringT1 format;
+        StringT format;
         int group;
     public:
-        explicit basic_number_formatter(const StringT1& fmt, int subgroup = 0)
+
+        /**********************************************************************************************//**
+         * @fn	explicit basic_number_formatter::basic_number_formatter(const StringT& fmt, int subgroup = 0)
+         *
+         * @brief	Constructor
+         *
+         * @param 	fmt			Describes the format to use.
+         * @param 	subgroup	(Optional) The subgroup.
+         **************************************************************************************************/
+
+        explicit basic_number_formatter(const StringT& fmt, int subgroup = 0)
         {
             format = fmt;
             group = subgroup;
         }
 
+        /**********************************************************************************************//**
+         * Function call operator
+         *
+         * @param 	what	The what.
+         *
+         * @returns	The result of the operation.
+         **************************************************************************************************/
+
         template<typename MatchT>
-        inline StringT1 operator()(const MatchT& what) const
+        inline StringT operator()(const MatchT& what) const
         {
             int n = roman_to_int(what.str(group));
             return fmt::format(format, n);
@@ -351,8 +426,13 @@ namespace oasis
 
         bool is_hidden(const boost::filesystem::path& p)
         {
-            bool ret = false;
             if (p.empty()) throw std::invalid_argument("The given path was empty.");
+#if defined(_MSC_VER)
+            DWORD dwAttributes = GetFileAttributes(p.wstring().c_str());
+            if (dwAttributes & FILE_ATTRIBUTE_HIDDEN) return true;
+            if (dwAttributes & FILE_ATTRIBUTE_SYSTEM) return true;
+#endif
+            bool ret = false;
             auto fn = p.filename().wstring();
             if (fn[0] == '.') ret = true;
 
@@ -369,6 +449,13 @@ namespace oasis
                 ec = boost::system::errc::make_error_code(boost::system::errc::invalid_argument);
                 return false;
             }
+
+#if defined(_MSC_VER)
+            DWORD dwAttributes = GetFileAttributes(p.wstring().c_str());
+            if (dwAttributes & FILE_ATTRIBUTE_HIDDEN) return true;
+            if (dwAttributes & FILE_ATTRIBUTE_SYSTEM) return true;
+#endif
+
             auto fn = p.filename().wstring();
             if (fn[0] == '.') ret = true;
 
