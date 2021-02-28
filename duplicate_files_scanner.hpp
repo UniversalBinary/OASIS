@@ -10,7 +10,7 @@
 #include <boost/thread.hpp>
 #include <mutex>
 #include <iterator>
-#include <botan/skein_512.h>
+#include <openssl/evp.h>
 #include <boost/algorithm/string.hpp>
 #include <boost/regex.hpp>
 #include "foundation.hpp"
@@ -26,7 +26,8 @@ namespace oasis::filesystem
     {
     private:
         bool _remove_single;
-        std::mutex _list_lock;
+        boost::mutex _list_lock;
+        boost::mutex _counter_lock;
         uintmax_t _file_count;
         uintmax_t _space_occupied;
         uintmax_t _sets_found;
@@ -36,13 +37,13 @@ namespace oasis::filesystem
         std::function<void(const boost::filesystem::path&, uintmax_t, uintmax_t, uintmax_t, uintmax_t)> _scan_completed_callback;
         std::function<void(const boost::filesystem::path&, const boost::filesystem::path&, const std::error_condition&)> _scan_error_callback;
         using set_t = std::set<boost::filesystem::path, SorterT>;
-        using map_t = std::map<std::tuple<uintmax_t, std::string>, set_t>;
+        using map_t = std::map<std::string, set_t>;
         map_t _sets;
 
         friend class unique_files_scanner;
 
-        bool _get_hash_of_file(const boost::filesystem::path& p, std::tuple<std::uintmax_t, std::string>& out, boost::system::error_code& ec);
-        void _process_file(const boost::filesystem::path& dirent, bool recurse);
+        void _process_filesystem_entry(const boost::filesystem::path& dirent, bool recurse);
+        void _process_file(boost::filesystem::path p);
 
     public:
         typedef typename map_t ::size_type size_type;
@@ -230,6 +231,7 @@ namespace oasis::filesystem
         duplicate_files_scanner& operator=(duplicate_files_scanner&& other) noexcept
         {
             _sets = std::move(other._sets);
+            _sets_found = other._sets_found;
             _follow_links = other._follow_links;
             _remove_single = other._remove_single;
             _files_encountered = other._files_encountered;
@@ -243,6 +245,7 @@ namespace oasis::filesystem
         duplicate_files_scanner& operator=(const duplicate_files_scanner& other)
         {
             _sets = other._sets;
+            _sets_found = other._sets_found;
             _follow_links = other._follow_links;
             _remove_single = other._remove_single;
             _files_encountered = other._files_encountered;
@@ -270,7 +273,7 @@ namespace oasis::filesystem
             _extensions = other._extensions;
             _file_count = other._file_count;
             _space_occupied = other._space_occupied;
-            _sets_found = 0;
+            _sets_found = other._sets_found;
         }
 
         duplicate_files_scanner(duplicate_files_scanner&& other) noexcept
@@ -285,7 +288,7 @@ namespace oasis::filesystem
             _sets_found = 0;
         }
 
-        void perform_scan(bool recursive) override;
+        void perform_scan(bool recurse) override;
 
     };
 
@@ -298,24 +301,39 @@ namespace oasis::filesystem
         directory_enumerator de(_search_dir);
         while (de.move_next(ec))
         {
-            _process_file(de.current(), recurse);
+            _process_filesystem_entry(de.current(), recurse);
         }
         if (ec && _scan_error_callback) _scan_error_callback(_search_dir, boost::filesystem::path(), ec.default_error_condition());
 
+        // Wait for threads.
+        //_threads.join_all();
+
         // Work out the statistics.
-        std::set<std::tuple<uintmax_t, std::string>> del_list;
+        std::set<std::string> del_list;
         for (const auto& k : _sets)
         {
-            if (k.second.size() == 1 && _remove_single)
+            if (k.second.size() == 1)
             {
-                del_list.insert(k.first);
-                continue;
+                if (_remove_single)
+                {
+                    del_list.insert(k.first);
+                    continue;
+                }
+                _file_count++;
+                boost::filesystem::path px = *(k.second.begin());
+                _space_occupied += boost::filesystem::file_size(px, ec);
+                if (ec && _scan_error_callback) _scan_error_callback(_search_dir, px, ec.default_error_condition());
             }
-            _file_count += k.second.size();
-            boost::filesystem::path px = *(k.second.begin());
-            _space_occupied += boost::filesystem::file_size(px, ec);
-            if (ec && _scan_error_callback) _scan_error_callback(_search_dir, px, ec.default_error_condition());
+            else
+            {
+                _file_count += k.second.size() - 1;
+                boost::filesystem::path px = *(k.second.begin());
+                auto fsize = boost::filesystem::file_size(px, ec);
+                if (ec && _scan_error_callback) _scan_error_callback(_search_dir, px, ec.default_error_condition());
+                _space_occupied += (fsize * (k.second.size() - 1));
+            }
         }
+
         if (_remove_single)
         {
             for (const auto& kr: del_list)
@@ -328,7 +346,7 @@ namespace oasis::filesystem
     }
 
     template<typename SorterT>
-    void duplicate_files_scanner<SorterT>::_process_file(const boost::filesystem::path& dirent, bool recurse)
+    void duplicate_files_scanner<SorterT>::_process_filesystem_entry(const boost::filesystem::path& dirent, bool recurse)
     {
         boost::system::error_code ec;
         boost::filesystem::path p;
@@ -395,7 +413,7 @@ namespace oasis::filesystem
             directory_enumerator de(p);
             while (de.move_next(sec))
             {
-                _process_file(de.current(), recurse);
+                _process_filesystem_entry(de.current(), recurse);
             }
             if (sec && _scan_error_callback) _scan_error_callback(_search_dir, p, sec.default_error_condition());
         }
@@ -409,21 +427,142 @@ namespace oasis::filesystem
             if (_scan_error_callback) _scan_error_callback(_search_dir, p, ec.default_error_condition());
             return;
         }
+
         if (!_extensions.empty())
         {
+            std::cout << "EXTENSIONS NOT EMPTY!!" << std::endl;
             auto e = p.extension().string();
             if (!_extensions.contains(e)) return;
         }
-        _files_encountered++;
-        std::tuple<uintmax_t, std::string> h;
-        if (!_get_hash_of_file(p, h, ec))
+
+        /*try
         {
-            if (ec && _scan_error_callback) _scan_error_callback(_search_dir, p, ec.default_error_condition());
+            // Try to run the add routine on a separate thread...
+            _threads.create_thread([p, this]() { _add_to_set(p); });
+        }
+        catch(...)
+        {
+            // If we cannot, we will have to run it on the main thread.
+            _process_file(p);
+        } */
+
+        _process_file(p);
+    }
+
+    template <typename SorterT>
+    void duplicate_files_scanner<SorterT>::_process_file(boost::filesystem::path p)
+    {
+        boost::system::error_code ec;
+        _counter_lock.lock();
+        _files_encountered++;
+        _counter_lock.unlock();
+
+        boost::filesystem::path directory = p;
+        directory.remove_filename();
+
+        unsigned char digest[EVP_MAX_MD_SIZE];
+        std::stringstream ss;
+        std::string h;
+        //std::unique_ptr<uint8_t, free_delete> _buffer;
+        auto file_size = boost::filesystem::file_size(p, ec);
+        if (ec)
+        {
+            if (_scan_error_callback) _scan_error_callback(directory, p, ec.default_error_condition());
             return;
         }
+        if ((file_size < _min_size) || (file_size > _max_size)) return;
 
-        std::cout << "Hash key of " << p << " " << std::get<0>(h) << " " << std::get<1>(h) << std::endl;
+        // Try to get some memory.
+        size_t buffer_size = (file_size < 10485760) ? file_size : 10485760;
+        auto _buffer = make_buffer(buffer_size);
 
+        EVP_MD_CTX *evp_ctx = EVP_MD_CTX_new();
+
+        // Try to open the file.
+        FILE *file = nullptr;
+        for (;;)
+        {
+#if defined (_MSC_VER)
+            file = _wfopen(p.wstring().c_str(), L"rbS");
+#else
+            file = fopen64(p.string().c_str(), "rb");
+#endif
+            if (file == nullptr)
+            {
+                if ((errno == ENFILE) || (errno == EMFILE) || (errno == ENOSR) || (errno == EAGAIN))
+                {
+                    boost::this_thread::sleep_for(boost::chrono::seconds(5));
+                    sleep(5);
+                    continue;
+                }
+                else
+                {
+                    ec = boost::system::error_code(errno, boost::system::system_category());
+                    if (_scan_error_callback) _scan_error_callback(directory, p, ec.default_error_condition());
+                    return;
+                }
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        // Start building the hash string key.
+        ss << file_size << ":";
+
+        // Deal with zero byte files
+        if (file_size == 0)
+        {
+            h = "0:0";
+        }
+        else if (file_size <= EVP_MAX_MD_SIZE) // If the contents of the file will fit inside the hash buffer then we can save a pointless hashing operation.
+        {
+            auto bytes_read = fread(digest, 1, file_size, file);
+            if (bytes_read != file_size)
+            {
+                ec = boost::system::error_code(errno, boost::system::system_category());
+                if (_scan_error_callback) _scan_error_callback(directory, p, ec.default_error_condition());
+                fclose(file);
+                return;
+            }
+            char *hex_out = OPENSSL_buf2hexstr(digest, file_size);
+            ss << hex_out;
+            OPENSSL_free(hex_out);
+            h = ss.str();
+        }
+        else
+        {
+            EVP_DigestInit(evp_ctx, EVP_sha512());
+#if defined (_MSC_VER)
+            while (!feof(file) && (_ftelli64 < file_size))
+#else
+            while (!feof(file) && (ftello64(file) < file_size))
+#endif
+            {
+                auto bytes_read = fread(_buffer.get(), 1, buffer_size, file);
+                if ((bytes_read == 0) || ferror(file))
+                {
+                    ec = boost::system::error_code(errno, boost::system::system_category());
+                    if (_scan_error_callback) _scan_error_callback(directory, p, ec.default_error_condition());
+                    fclose(file);
+                    EVP_MD_CTX_free(evp_ctx);
+                    return;
+                }
+                EVP_DigestUpdate(evp_ctx, _buffer.get(), bytes_read);
+            }
+            EVP_DigestFinal(evp_ctx, digest, nullptr);
+            char *hex_out = OPENSSL_buf2hexstr(digest, EVP_MAX_MD_SIZE);
+            ss << hex_out;
+            OPENSSL_free(hex_out);
+            h = ss.str();
+        }
+        fclose(file);
+
+        // Free the memory as soon as we are finished with it.
+        _buffer.reset();
+
+        // Query set for discovered hash.
         _list_lock.lock();
         if (_sets.contains(h))
         {
@@ -435,98 +574,8 @@ namespace oasis::filesystem
             auto result = _sets.emplace(std::make_pair(h, set_t()));
             if (result.second) result.first->second.emplace(p);
         }
-        if (_scan_progress_callback) _scan_progress_callback(_search_dir, _files_encountered, _sets_found);
         _list_lock.unlock();
-    }
-
-    template<typename SorterT>
-    bool duplicate_files_scanner<SorterT>::_get_hash_of_file(const boost::filesystem::path& p, std::tuple<std::uintmax_t, std::string>& out, boost::system::error_code& ec)
-    {
-        ec.clear();
-        std::unique_ptr<uint8_t> _buffer;
-        auto s = boost::filesystem::file_size(p, ec);
-        if (ec) return false;
-        if ((s < _min_size) || (s > _max_size)) return false;
-
-        size_t buffer_size = (s < 10485760) ? s : 10485760;
-        _buffer = std::unique_ptr<uint8_t>(new uint8_t[buffer_size]);
-
-        static constexpr char hex[] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'};
-        Botan::Skein_512 hasher;
-        auto digest_length = hasher.output_length();
-
-        // Try to open the file.
-        FILE *file = nullptr;
-        for (;;)
-        {
-            file = fopen(p.string().c_str(), "rb");
-            if (file == nullptr)
-            {
-                if ((errno == ENFILE) || (errno == EMFILE) || (errno == ENOSR) || (errno == EAGAIN))
-                {
-                    boost::this_thread::sleep_for(boost::chrono::seconds(5));
-                    continue;
-                }
-                else
-                {
-                    ec = boost::system::error_code(errno, boost::system::system_category());
-                    return false;
-                }
-            }
-            else
-            {
-                break;
-            }
-        }
-
-        std::string result;
-        result.reserve(digest_length * 2);   // Two digits per character
-        // If the contents of the file will fit inside the hash string then we can save a pointless hashing operation.
-        if (s <= digest_length)
-        {
-            result.insert(0, (digest_length * 2), '0');
-            auto bytes_read = fread(_buffer.get(), 1, s, file);
-            if (bytes_read != s)
-            {
-                ec = boost::system::error_code(errno, boost::system::system_category());
-                fclose(file);
-                return false;
-            }
-            auto temp = _buffer.get();
-            auto it = result.begin();
-            for (size_t i = 0; i < s; i++)
-            {
-                auto c = temp[i];
-                *it = hex[c / 16];
-                it++;
-                *it = hex[c % 16];
-            }
-        }
-        else
-        {
-            while (!feof(file))
-            {
-                auto bytes_read = fread(_buffer.get(), 1, buffer_size, file);
-                if (bytes_read == 0)
-                {
-                    ec = boost::system::error_code(errno, boost::system::system_category());
-                    fclose(file);
-                    return false;
-                }
-                hasher.update(_buffer.get(), bytes_read);
-            }
-            auto digest = hasher.final_stdvec();
-
-            for (uint8_t c : digest)
-            {
-                result.push_back(hex[c / 16]);
-                result.push_back(hex[c % 16]);
-            }
-        }
-        fclose(file);
-        out = std::make_tuple(s, result);
-
-        return true;
+        if (_scan_progress_callback) _scan_progress_callback(directory, _files_encountered, _sets_found);
     }
 }
 

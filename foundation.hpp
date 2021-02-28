@@ -9,12 +9,15 @@
 #include <fmt/format.h>
 #include <cmath>
 #include <cerrno>
+#include <boost/multiprecision/gmp.hpp>
 #if defined(_MSC_VER)
 #ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN 
-#endif 
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include "win32_error.hpp"
+#else
+#include <sys/stat.h>
 #endif
 
 #ifndef _BASE_HPP_
@@ -22,6 +25,27 @@
 
 namespace oasis
 {
+    struct free_deleter
+    {
+        void operator()(void *x)
+        {
+            std::free(x);
+        }
+    };
+
+    inline std::unique_ptr<uint8_t, free_deleter> make_buffer(uintmax_t size)
+    {
+        for (;;)
+        {
+            auto *mem = static_cast<uint8_t *>(std::malloc(size));
+            if (mem != nullptr)
+            {
+                return std::unique_ptr<uint8_t, free_deleter>(mem);
+            }
+            sleep(5);
+        }
+    }
+
     enum class operation_state
     {
         imminent,
@@ -48,6 +72,34 @@ namespace oasis
 
         }
     };
+
+   /**********************************************************************************************//**
+    * @brief An enhanced version of std::isalnum that returns a bool value and will return \c false
+    *        if \p ch is outside the range of unsigned char, as opposed to exhibiting 'undefined'
+    *        behaviour.
+    *
+    * @param ch The character to classify.
+    * @return Returns true if \p ch is an alphanumeric character in the latin alphabet; otherwise
+    *         false;
+    **************************************************************************************************/
+    inline bool is_alphanumeric(int ch)
+    {
+        if ((ch < 0) || (ch > 255)) return false;
+
+        return (std::isalnum(ch) != 0);
+    }
+
+    /**********************************************************************************************//**
+    * @brief An inversion of is_alphanumeric()
+    *
+    * @param ch The character to classify.
+    * @return Returns true if \p ch is not an alphanumeric character in the latin alphabet; otherwise
+    *         false;
+    **************************************************************************************************/
+    inline bool not_alphanumeric(int ch)
+    {
+        return !is_alphanumeric(ch);
+    }
 
     /**********************************************************************************************//**
      * @fn	template<typename StringT> inline StringT cleanup_spaces(StringT& str)
@@ -212,6 +264,70 @@ namespace oasis
     typedef basic_number_formatter<std::string> snumber_formatter;
     typedef basic_number_formatter<std::wstring> wsnumber_formatter;
 
+    class storage_formatter
+    {
+    private:
+        boost::multiprecision::mpf_float _value;
+        std::map<boost::multiprecision::mpf_float , std::string> _thresholds;
+        void _init_threasholds()
+        {
+            _thresholds.insert({ 1, "Byte"});
+            _thresholds.insert({ 2, "Bytes" });
+            _thresholds.insert({ 1024, "KiB" });
+            _thresholds.insert({ 1048576, "MiB" });
+            _thresholds.insert({ 1073741824, "GiB" });
+            _thresholds.insert({ 1099511627776, "TiB" });
+            _thresholds.insert({ 1125899906842620, "PiB" });
+            _thresholds.insert({ 1152921504606850000, "EiB" });
+            _thresholds.insert({ boost::multiprecision::mpf_float("1180591620717410000000"), "ZiB" });
+            _thresholds.insert({ boost::multiprecision::mpf_float("1208925819614630000000000"), "YiB" });
+        }
+    public:
+        storage_formatter()
+        {
+            _init_threasholds();
+            _value = 0;
+        }
+
+        explicit storage_formatter(uintmax_t val)
+        {
+            _init_threasholds();
+            _value = val;
+        }
+
+        explicit storage_formatter(const boost::multiprecision::mpz_int& val)
+        {
+            _init_threasholds();
+            _value = val;
+        }
+
+        friend std::ostream& operator<<(std::ostream& os, const storage_formatter& sf);
+    };
+
+    std::ostream& operator<<(std::ostream& os, const storage_formatter& sf)
+    {
+        if (sf._value == 0)
+        {
+            os << "0 Bytes"; // zero is plural
+            return os;
+        }
+
+        std::stringstream ss;
+        std::locale user_locale("");
+        ss.imbue(user_locale);
+        for (auto it = sf._thresholds.rbegin(); it != sf._thresholds.rend(); it++)
+        {
+            if (sf._value >= it->first)
+            {
+                ss << std::setprecision(2) << std::fixed << (sf._value / it->first) << " " << it->second;
+                os << ss.str();
+                return os;
+            }
+        }
+
+        return os;
+    }
+
     namespace filesystem
     {
         struct sort_by_creation_time
@@ -310,7 +426,7 @@ namespace oasis
             uintmax_t _files_encountered;
             boost::filesystem::path _search_dir;
         public:
-            directory_scanner(const boost::filesystem::path& p)
+            explicit directory_scanner(const boost::filesystem::path& p)
             {
                 if (p.empty()) throw std::invalid_argument("Invalid search path");
                 _search_dir = boost::filesystem::canonical(p);
@@ -423,6 +539,38 @@ namespace oasis
                 return _files_encountered;
             }
         };
+
+        std::string identifier(const boost::filesystem::path& p)
+        {
+            std::stringstream ss;
+#if defined(_MSC_VER)
+
+#else
+            struct stat buff{};
+            if (stat(p.string().c_str(), &buff) != 0) throw std::system_error(errno, std::generic_category());
+            ss << buff.st_dev << ":" << buff.st_ino;
+#endif
+
+            return ss.str();
+        }
+
+        std::string identifier(const boost::filesystem::path& p, boost::system::error_code& ec) noexcept
+        {
+            std::stringstream ss;
+#if defined(_MSC_VER)
+
+#else
+            struct stat buff{};
+            if (stat(p.string().c_str(), &buff) != 0)
+            {
+                ec = boost::system::error_code(errno, boost::system::system_category());
+                return std::string();
+            }
+            ss << buff.st_dev << ":" << buff.st_ino;
+#endif
+
+            return ss.str();
+        }
 
         bool is_hidden(const boost::filesystem::path& p)
         {

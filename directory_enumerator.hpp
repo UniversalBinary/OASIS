@@ -94,8 +94,8 @@ namespace oasis::filesystem
          * 			false if not; if the position of the enumerator was not advanced due to an error, the
          * 			ec parameter should contain more information.
          *
-         * ### remarks	If a temporary, recoverable error, such as low system resources or a device or
-         * 				resource is busy, this function will block.
+         * ### remarks	If a temporary, recoverable error occurs, such as low system resources or a device
+         * 				or resource is busy, this function will block.
          **************************************************************************************************/
 
         bool move_next(boost::system::error_code& ec) noexcept;
@@ -121,7 +121,7 @@ namespace oasis::filesystem
 
 #if defined(__GNUC__) || defined(__clang__) || defined(__MINGW32__) || defined(__MINGW64__)
 
-    bool directory_enumerator::move_next(boost::system::error_code& ec)
+    bool directory_enumerator::move_next(boost::system::error_code& ec) noexcept
     {
         ec.clear();
 
@@ -138,7 +138,7 @@ namespace oasis::filesystem
                 }
                 else
                 {
-                    ec = boost::system::error_code(errno, boost::system::generic_category();
+                    ec = boost::system::error_code(errno, boost::system::generic_category());
                     return false;
                 }
             }
@@ -152,7 +152,7 @@ namespace oasis::filesystem
             auto de = readdir(_pdir);
             if (de == nullptr)
             {
-                ec = boost::system::error_code(errno, boost::system::generic_category();
+                ec = boost::system::error_code(errno, boost::system::generic_category());
                 _ended = true;
                 closedir(_pdir);
                 _pdir = nullptr;
